@@ -6,6 +6,7 @@
 module Main where
 
 import           Protolude
+import           Data.String (String)
 import           Control.Lens ((^.), (.~), (%~))
 import           Control.Lens.TH (makeLenses)
 import qualified Data.Map as Map
@@ -32,6 +33,8 @@ import qualified System.Directory as Dir
 import qualified Hoogle as H
 import qualified System.Process.Typed as PT
 import qualified Data.ByteString.Lazy as BSL
+import Text.Regex.TDFA
+import Text.Regex.TDFA.Text ()
 
 
 -- | Events that can be sent
@@ -42,6 +45,8 @@ newtype Event = EventUpdateTime Tm.LocalTime
 data Name = TypeSearch
           | TextSearch
           | ListResults
+          | ListResults'
+          | ListResults''
           deriving (Show, Eq, Ord)
 
 -- | Sort order
@@ -58,6 +63,8 @@ data BrickState = BrickState { _stEditType :: !(BE.Editor Text Name)      -- ^ E
                              , _stFocus :: !(BF.FocusRing Name)           -- ^ Focus ring - a circular list of focusable controls
                              , _stResults :: [H.Target]                   -- ^ The last set of search results from hoohle
                              , _stResultsList :: !(BL.List Name H.Target) -- ^ List for the search results
+                             , _stResultsList' :: !(BL.List Name H.Target) -- ^ List for the search results
+                             , _stResultsList'' :: !(BL.List Name H.Target) -- ^ List for the search results
                              , _stSortResults :: SortBy                   -- ^ Current sort order for the results
                              , _stDbPath :: FilePath                      -- ^ Hoogle DB path
                              , _yankCommand :: Text                       -- ^ Command to run to copy text to the clipboard 
@@ -116,6 +123,8 @@ runBHoogle dbPath = do
   let st = BrickState { _stEditType = BE.editor TypeSearch (Just 1) ""
                       , _stEditText = BE.editor TextSearch (Just 1) ""
                       , _stResultsList = BL.list ListResults Vec.empty 1
+                      , _stResultsList' = BL.list ListResults' Vec.empty 1
+                      , _stResultsList'' = BL.list ListResults'' Vec.empty 1
                       , _stTime = t
                       , _stFocus = BF.focusRing [TypeSearch, TextSearch, ListResults]
                       , _stResults = []
@@ -213,7 +222,12 @@ handleEvent st ev =
                   -- Using handleListEventVi which adds vi-style keybindings for navigation
                   --  and the standard handleListEvent as a fallback for all other events
                   r <- BL.handleListEventVi BL.handleListEvent ve $ st ^. stResultsList
-                  B.continue $ st & stResultsList .~ r
+                  r' <- BL.handleListEventVi BL.handleListEvent ve $ st ^. stResultsList'
+                  r'' <- BL.handleListEventVi BL.handleListEvent ve $ st ^. stResultsList''
+                  B.continue $ st
+                    & stResultsList .~ r
+                    & stResultsList' .~ r'
+                    & stResultsList'' .~ r''
 
             _ -> B.continue st
 
@@ -269,16 +283,17 @@ searchAhead search st =
 
 -- | Filter the results from hoogle using the search text
 filterResults :: BrickState -> BrickState
-filterResults st =
-  let allResults = st ^. stResults in
-  let filterText = Txt.toLower . Txt.strip . Txt.concat . BE.getEditContents $ st ^. stEditText in
-
+filterResults st = do
+  let allResults = st ^. stResults
+  let filterText = Txt.toLower . Txt.strip . Txt.concat . BE.getEditContents $ st ^. stEditText
   let results =
         if Txt.null filterText
         then allResults
         else filter (\t -> Txt.isInfixOf filterText . Txt.toLower $ formatResult t) allResults
-  in
-  st & stResultsList .~ BL.list ListResults (Vec.fromList results) 1
+  st
+    & stResultsList .~ BL.list ListResults (Vec.fromList results) 1
+    & stResultsList' .~ BL.list ListResults' (Vec.fromList results) 1
+    & stResultsList'' .~ BL.list ListResults'' (Vec.fromList results) 1
   
 
 -- | Draw the UI
@@ -298,11 +313,16 @@ drawUI st =
       (B.withAttr "infoTitle" $ B.txt "Results: ") <+> B.txt (showing <> "/" <> total)
       <=>
       (B.padTop (B.Pad 1) $
-       resultsContent <+> resultsDetail
+       resultsContent <+> (B.padLeft (B.Pad 1) resultsContent') <+> (B.hLimit 16 $ B.padLeft (B.Pad 1) resultsContent'') <+> resultsDetail
       )
 
     resultsContent =
       BL.renderList (\_ e -> B.txt $ formatResult e) False (st ^. stResultsList)
+
+    resultsContent' =
+      BL.renderList (\_ e -> B.txt $ formatResult' e) False (st ^. stResultsList')
+    resultsContent'' =
+      BL.renderList (\_ e -> B.txt $ formatResult'' e) False (st ^. stResultsList'')
 
     resultsDetail =
       B.padLeft (B.Pad 1) $
@@ -387,9 +407,22 @@ searchHoogle path f =
 -- | Format the hoogle results so they roughly match what the terminal app would show
 formatResult :: H.Target -> Text
 formatResult t =
-  let typ = clean $ H.targetItem t in
   let m = (clean . fst) <$> H.targetModule t in
-  Txt.pack $ fromMaybe "" m <> " :: " <> typ
+  Txt.pack $ fromMaybe "" m
+
+-- | Format the hoogle results so they roughly match what the terminal app would show
+formatResult' :: H.Target -> Text
+formatResult' t = do
+  let typ = clean $ H.targetItem t
+  let (_,_,b) = typ =~ (" :: " :: String) :: (String, String, String)
+  Txt.pack $ b 
+
+-- | Format the hoogle results so they roughly match what the terminal app would show
+formatResult'' :: H.Target -> Text
+formatResult'' t = do
+  let typ = clean $ H.targetItem t
+  let (a,_,_) = typ =~ (" :: " :: String) :: (String, String, String)
+  Txt.pack $ a 
   
 
 clean :: [Char] -> [Char]
